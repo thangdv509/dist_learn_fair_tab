@@ -3,3 +3,6 @@ tuning_results
 processed_data
 visualizations
 bert_cache
+sampled_data
+predicted
+models

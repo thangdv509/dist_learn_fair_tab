@@ -1,0 +1,57 @@
+{
+  "german-credit-data": {
+    "sentences": [
+      "A {age}-year-old {sex} applicant with {marital_status} status, working as {job}.",
+      "The request is {credit_amount} for {purpose} over {duration} months, with checking account {checking_account} and savings account {savings_account}.",
+      "The person lists credit history {credit_history}, employment since {employment_since}, installment rate {installment_rate}, and other debtors {other_debtors}.",
+      "Current details include residence since {residence_since} years, property {property}, other installment plans {other_installment}, housing {housing}, and existing credits {existing_credits}.",
+      "The person supports {num_people} dependents, has telephone access {telephone}, and has foreign-worker status {foreign_worker}."
+    ],
+    "field_mapping": {
+      "age": ["age", "Age"],
+      "sex": ["sex", "Sex", "gender", "Gender"],
+      "marital_status": ["marital-status", "marital_status", "Marital-Status"],
+      "job": ["job", "Job", "occupation", "Occupation"],
+      "credit_amount": ["credit-amount", "credit_amount", "Credit-Amount"],
+      "duration": ["duration", "Duration"],
+      "purpose": ["purpose", "Purpose"],
+      "checking_account": ["checking-account", "checking_account", "Checking-Account"],
+      "savings_account": ["savings-account", "savings_account", "Savings-Account"],
+      "credit_history": ["credit-history", "credit_history", "Credit-History"],
+      "employment_since": ["employment-since", "employment_since", "Employment-Since"],
+      "installment_rate": ["installment-rate", "installment_rate", "Installment-Rate"],
+      "other_debtors": ["other-debtors", "other_debtors", "Other-Debtors"],
+      "residence_since": ["residence-since", "residence_since", "Residence-Since"],
+      "property": ["property", "Property"],
+      "other_installment": ["other-installment", "other_installment", "Other-Installment"],
+      "housing": ["housing", "Housing"],
+      "existing_credits": ["existing-credits", "existing_credits", "Existing-Credits"],
+      "num_people": ["number-people-provide-maintenance-for", "number_people_provide_maintenance_for", "Number-People-Provide-Maintenance-For"],
+      "telephone": ["telephone", "Telephone"],
+      "foreign_worker": ["foreign-worker", "foreign_worker", "Foreign-Worker"]
+    }
+  },
+  "adult": {
+    "sentences": [
+        "A {age}-year-old {gender} with race {race}, marital status {marital_status}, and relationship {relationship}.",
+        "This person works as {occupation} in {workclass}, with {education} education (level {educational_num}), working {hours_per_week} hours per week.",
+        "Capital gain is {capital_gain}, capital loss is {capital_loss}, native country is {native_country}, and fnlwgt is {fnlwgt}."
+    ],
+    "field_mapping": {
+      "age": ["age"],
+      "gender": ["gender", "sex"],
+      "race": ["race"],
+      "marital_status": ["marital-status", "marital_status"],
+      "relationship": ["relationship"],
+      "workclass": ["workclass"],
+      "education": ["education"],
+      "educational_num": ["educational-num", "educational_num"],
+      "occupation": ["occupation"],
+      "hours_per_week": ["hours-per-week", "hours_per_week"],
+      "capital_gain": ["capital-gain", "capital_gain"],
+      "capital_loss": ["capital-loss", "capital_loss"],
+      "native_country": ["native-country", "native_country"],
+      "fnlwgt": ["fnlwgt"]
+    }
+  }
+}

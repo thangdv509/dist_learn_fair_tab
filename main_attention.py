@@ -62,7 +62,7 @@ def get_cache_path(sentences, dataset_name, cache_dir="bert_cache"):
     cache_file = os.path.join(cache_dir, f"{dataset_name}_{content_hash}.pkl")
     return cache_file
 
-def compute_and_cache_tokenized_data(sentences, dataset_name, max_len=50, force_recompute=False):
+def compute_and_cache_tokenized_data(sentences, dataset_name, max_len=100, force_recompute=False):
     """
     Pre-compute tokenized data for all sentences and cache them for faster training.
     This significantly speeds up training by avoiding repeated tokenization.
@@ -373,10 +373,12 @@ class ContentHead(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
     
-    def forward(self, bert_output, attention_mask=None):
+    def forward(self, bert_output, attention_mask=None, token_ids=None, mask_stop_words=False):
         """
         bert_output: [batch_size, seq_len, d_model]
         attention_mask: [batch_size, seq_len] - 1 for real tokens, 0 for padding
+        token_ids: [batch_size, seq_len] - BERT token IDs (for masking stop words)
+        mask_stop_words: If True, mask common stop words in attention
         Returns: z_c [batch_size, latent_dim], attn_weights [batch_size, seq_len], mu, logvar
         """
         # Compute attention logits
@@ -386,7 +388,17 @@ class ContentHead(nn.Module):
         if attention_mask is not None:
             attn_logits = attn_logits.masked_fill(attention_mask == 0, -1e9)
         
-        # Apply softmax to get attention weights (padding tokens will have 0 weight)
+        # Optionally mask stop words (BERT tokenizer IDs for common stop words)
+        # These are BERT's token IDs for: a, an, the, and, or, but, in, on, at, to, for, of, with, by, as, is, are, was, were
+        if mask_stop_words and token_ids is not None:
+            # Common stop word token IDs in BERT vocabulary (approximate, may need adjustment)
+            # You can get these by: tokenizer.convert_tokens_to_ids(['a', 'an', 'the', ...])
+            stop_word_ids = {1037, 1039, 1996, 1998, 2004, 2010, 2012, 2013, 2014, 2015, 2017, 2019, 2020, 2022, 2024, 2003, 2024, 2027, 2028}
+            # Create mask for stop words
+            stop_word_mask = torch.isin(token_ids, torch.tensor(list(stop_word_ids), device=token_ids.device))
+            attn_logits = attn_logits.masked_fill(stop_word_mask, -1e9)
+        
+        # Apply softmax to get attention weights (padding tokens and stop words will have 0 weight)
         attn_weights = torch.softmax(attn_logits, dim=1)  # [batch_size, seq_len]
         
         # Weighted sum of token embeddings
@@ -438,10 +450,12 @@ class DemographicHead(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
     
-    def forward(self, bert_output, attention_mask=None):
+    def forward(self, bert_output, attention_mask=None, token_ids=None, mask_stop_words=False):
         """
         bert_output: [batch_size, seq_len, d_model]
         attention_mask: [batch_size, seq_len] - 1 for real tokens, 0 for padding
+        token_ids: [batch_size, seq_len] - BERT token IDs (for masking stop words)
+        mask_stop_words: If True, mask common stop words in attention
         Returns: z_d [batch_size, latent_dim], attn_weights [batch_size, seq_len], mu, logvar
         """
         # Compute attention logits
@@ -451,7 +465,13 @@ class DemographicHead(nn.Module):
         if attention_mask is not None:
             attn_logits = attn_logits.masked_fill(attention_mask == 0, -1e9)
         
-        # Apply softmax to get attention weights (padding tokens will have 0 weight)
+        # Optionally mask stop words (same as ContentHead)
+        if mask_stop_words and token_ids is not None:
+            stop_word_ids = {1037, 1039, 1996, 1998, 2004, 2010, 2012, 2013, 2014, 2015, 2017, 2019, 2020, 2022, 2024, 2003, 2024, 2027, 2028}
+            stop_word_mask = torch.isin(token_ids, torch.tensor(list(stop_word_ids), device=token_ids.device))
+            attn_logits = attn_logits.masked_fill(stop_word_mask, -1e9)
+        
+        # Apply softmax to get attention weights (padding tokens and stop words will have 0 weight)
         attn_weights = torch.softmax(attn_logits, dim=1)  # [batch_size, seq_len]
         
         # Weighted sum of token embeddings
@@ -479,6 +499,7 @@ class CD_Model(nn.Module):
         # One shared BERT encoder
         print("Loading pretrained BERT-base-uncased (shared encoder)...")
         self.bert = AutoModel.from_pretrained("bert-base-uncased").to(device)
+        self.use_bert = True  # Always use BERT (for visualization compatibility)
         if freeze_bert:
             for param in self.bert.parameters():
                 param.requires_grad = False
@@ -552,7 +573,14 @@ class CD_Model(nn.Module):
 
 # ============== LOSS FUNCTIONS ==============
 def compute_kl_loss(mu, logvar):
-    return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    """
+    Compute KL divergence loss: KL(q(z|x) || p(z)) where p(z) = N(0, I)
+    Normalized by batch size to match scale of other losses (CE, MSE, etc.)
+    """
+    # KL divergence per sample: -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
+    # Shape: [batch_size, latent_dim] -> [batch_size] -> scalar (mean)
+    kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+    return torch.mean(kl_per_sample)  # Normalize by batch size
 
 def compute_reconstruction_loss(original_h, reconstructed_h):
     return nn.functional.mse_loss(reconstructed_h, original_h)
@@ -629,7 +657,7 @@ def compute_separation_loss(z, labels, margin=2.0):
 
 
 # ============== TRAINING ==============
-def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1.0, lambda_adv=8.0, lambda_rec=0.5, lambda_ortho=1.0, lambda_kl=0.01, latent_dim=64, lr=0.001, use_cache=True, dataset_name="default", force_recompute_cache=False, use_amp=False):
+def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3.0, lambda_adv=3.0, lambda_rec=0.5, lambda_ortho=1.0, lambda_kl=0.01, latent_dim=64, lr=2e-5, use_cache=True, dataset_name="default", force_recompute_cache=False, use_amp=False):
     """
     Train the model to learn disentangled representations from Natural Language.
     
@@ -713,15 +741,30 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1
     
     # Use weighted sampler instead of shuffle=True for better handling of imbalanced data
     # Optimize DataLoader for GPU: use multiple workers and pin memory
-    num_workers = 4 if torch.cuda.is_available() else 0  # Use 4 workers on GPU, 0 on CPU
-    pin_memory = torch.cuda.is_available()  # Pin memory for faster GPU transfer
+    # RTX 5090 (31GB VRAM) can handle more workers and larger batches
+    if torch.cuda.is_available():
+        # Get GPU memory to optimize settings
+        gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        if gpu_memory_gb >= 30:  # High-end GPU (RTX 5090, A100, etc.)
+            num_workers = 8  # More workers for faster data loading
+            prefetch_factor = 4  # Prefetch more batches
+        else:
+            num_workers = 4
+            prefetch_factor = 2
+        pin_memory = True
+    else:
+        num_workers = 0
+        prefetch_factor = 2
+        pin_memory = False
+    
     dataloader = DataLoader(
         dataset, 
         batch_size=batch_size, 
         sampler=weighted_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        persistent_workers=num_workers > 0  # Keep workers alive between epochs
+        persistent_workers=num_workers > 0,  # Keep workers alive between epochs
+        prefetch_factor=prefetch_factor if num_workers > 0 else None  # Prefetch batches
     )
     
     # Get vocab size from tokenizer
@@ -730,22 +773,42 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1
     # VAE bottleneck compresses from 768 to latent_dim for better disentanglement
     model = CD_Model(num_classes=num_classes, d_model=768, latent_dim=latent_dim, freeze_bert=False).to(device)
     
+    # Compile model for faster training (PyTorch 2.0+)
+    # NOTE: torch.compile() can cause issues with gradient tracking when freezing/unfreezing parameters
+    # Disable for now to avoid "does not require grad" errors
+    # TODO: Re-enable with proper handling of requires_grad changes
+    use_compile = False  # Set to True if you want to try compilation (may cause gradient issues)
+    if use_compile:
+        try:
+            if hasattr(torch, 'compile') and torch.cuda.is_available():
+                print("✓ Compiling model with torch.compile() for faster training...")
+                model = torch.compile(model, mode='reduce-overhead')  # Fastest mode for training
+        except Exception as e:
+            print(f"⚠ Could not compile model (PyTorch version may be < 2.0): {e}")
+            print("  Training will continue without compilation (slightly slower)")
+    else:
+        print("ℹ Model compilation disabled (to avoid gradient tracking issues with freeze/unfreeze)")
+    
     # Optimizers with different learning rates
-    # Train shared BERT, 2 heads, and decoder
-    optimizer = optim.Adam(
-        list(model.bert.parameters()) + 
-        list(model.content_head.parameters()) +
-        list(model.demographic_head.parameters()) +
-        list(model.decoder.parameters()),
-        lr=lr
-    )
+    # BERT needs smaller LR, heads/decoder can use slightly higher
+    # Separate BERT optimizer with smaller LR (BERT standard: 1e-5 to 5e-5)
+    bert_lr = lr  # Use provided LR (should be ~2e-5 for BERT)
+    head_lr = lr * 2.0  # Heads can learn faster
+    
+    optimizer = optim.AdamW([
+        {'params': model.bert.parameters(), 'lr': bert_lr},
+        {'params': list(model.content_head.parameters()) + 
+                  list(model.demographic_head.parameters()) + 
+                  list(model.decoder.parameters()), 'lr': head_lr}
+    ], weight_decay=0.01)  # AdamW with weight decay for better BERT training
+    
     # Separate optimizer for classifier with higher LR for faster learning
     optimizer_classifier = optim.Adam(
         model.classifier.parameters(),
-        lr=lr * 2.0  # Higher LR for classifier to learn faster
+        lr=lr * 10.0  # Much higher LR for classifier to learn task quickly
     )
-    # Adversarial classifier with slightly higher LR to learn faster
-    optimizer_adv = optim.Adam(model.adversarial_classifier.parameters(), lr=lr * 1.5)
+    # Adversarial classifier with higher LR to learn faster
+    optimizer_adv = optim.Adam(model.adversarial_classifier.parameters(), lr=lr * 10.0)
     
     # Learning rate schedulers
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -762,6 +825,9 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1
     scaler = torch.cuda.amp.GradScaler() if (use_amp and torch.cuda.is_available()) else None
     if use_amp and torch.cuda.is_available():
         print("✓ Mixed Precision Training (AMP) enabled - faster training on GPU")
+        # Enable cuDNN benchmarking for consistent input sizes (faster on RTX 5090)
+        torch.backends.cudnn.benchmark = True
+        print("✓ cuDNN benchmarking enabled - faster convolutions on GPU")
     
     history = {
         'epoch': [], 'loss_enc': [], 
@@ -780,6 +846,8 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1
     best_loss = float('inf')
     patience_count = 0
     patience = 10
+    best_model_state = None  # Store best model state
+    best_model_epoch = 0
     
     print(f"Dataset: {len(sentences)} samples, {sum(labels)} good, {len(labels) - sum(labels)} bad")
     
@@ -806,9 +874,10 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1
         
         for batch_idx, batch in enumerate(dataloader):
             try:
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                labels_batch = batch['label'].to(device)
+                # Use non_blocking=True for faster GPU transfer (overlaps with computation)
+                input_ids = batch['input_ids'].to(device, non_blocking=True)
+                attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+                labels_batch = batch['label'].to(device, non_blocking=True)
                 
                 # Get output (includes original_h for reconstruction)
                 # No need to get separately, it's in output['original_h']
@@ -818,21 +887,41 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1
                 # This classifier tries to find ANY task information in z_d
                 # We train it normally (minimize CE loss) so it becomes strong
                 # The encoder will learn to hide this information via GRL (gradient reversal)
+                
+                # Ensure adversarial_classifier is trainable (unfreeze if needed)
+                # This is critical - must be done before forward pass
+                for param in model.adversarial_classifier.parameters():
+                    param.requires_grad = True
+                
                 optimizer_adv.zero_grad()
-                output_adv = model(input_ids, attention_mask)
-                z_d_detached = output_adv['z_d'].detach()  # Detach so encoder doesn't get gradient in this step
-                logits_y_from_z_d_adv = model.adversarial_classifier(z_d_detached)  # Predict y from z_d (Demographic)
-                # Use class weights for adversarial classifier too
-                loss_adv_classifier = nn.functional.cross_entropy(
-                    logits_y_from_z_d_adv, 
-                    labels_batch,
-                    weight=class_weights
-                )
-                # Add entropy penalty to encourage confident predictions (if info exists)
-                # This helps encoder learn to remove that information
-                probs = torch.softmax(logits_y_from_z_d_adv, dim=1)
-                entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1).mean()
-                loss_adv_classifier = loss_adv_classifier - 0.1 * entropy  # Encourage confident predictions
+                
+                # Forward pass - get z_d from model
+                with torch.set_grad_enabled(True):  # Ensure gradients are enabled
+                    output_adv = model(input_ids, attention_mask)
+                    z_d_detached = output_adv['z_d'].detach()  # Detach so encoder doesn't get gradient in this step
+                    
+                    # Forward through adversarial classifier
+                    # This should create gradient graph for adversarial_classifier parameters
+                    logits_y_from_z_d_adv = model.adversarial_classifier(z_d_detached)
+                    
+                    # Verify adversarial_classifier parameters require grad
+                    has_grad = any(p.requires_grad for p in model.adversarial_classifier.parameters())
+                    if not has_grad:
+                        raise RuntimeError("adversarial_classifier parameters do not require grad! Check model setup.")
+                    
+                    # Use class weights for adversarial classifier too
+                    loss_adv_classifier = nn.functional.cross_entropy(
+                        logits_y_from_z_d_adv, 
+                        labels_batch,
+                        weight=class_weights
+                    )
+                    # Add entropy penalty to encourage confident predictions (if info exists)
+                    # This helps encoder learn to remove that information
+                    probs = torch.softmax(logits_y_from_z_d_adv, dim=1)
+                    entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1).mean()
+                    loss_adv_classifier = loss_adv_classifier - 0.1 * entropy  # Encourage confident predictions
+                
+                # Backward pass
                 if scaler is not None:
                     scaler.scale(loss_adv_classifier).backward()
                     scaler.step(optimizer_adv)
@@ -888,25 +977,28 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1
                 loss_kl_d = compute_kl_loss(output['mu_d'], output['logvar_d'])
                 loss_kl = loss_kl_c + loss_kl_d
                 
-                # ============ TRAIN CLASSIFIER SEPARATELY ============
-                # Train classifier first (separate step for faster learning)
-                optimizer_classifier.zero_grad()
-                z_c_detached = output['z_c'].detach()  # Detach to avoid gradient conflict
-                logits_y_from_z_c_detached = model.classifier(z_c_detached)
-                loss_task_classifier = nn.functional.cross_entropy(
-                    logits_y_from_z_c_detached, 
-                    labels_batch,
-                    weight=class_weights
-                )
-                if scaler is not None:
-                    scaler.scale(loss_task_classifier).backward()
-                    scaler.step(optimizer_classifier)
-                    scaler.update()
-                else:
-                    loss_task_classifier.backward()
-                    optimizer_classifier.step()
+                # ============ TRAIN CLASSIFIER SEPARATELY (MULTIPLE STEPS) ============
+                # Train classifier multiple times per batch to learn faster
+                # This helps classifier learn task before encoder tries to optimize z_c
+                num_classifier_steps = 3  # Train classifier 3 times per batch
+                for _ in range(num_classifier_steps):
+                    optimizer_classifier.zero_grad()
+                    z_c_detached = output['z_c'].detach()  # Detach to avoid gradient conflict
+                    logits_y_from_z_c_detached = model.classifier(z_c_detached)
+                    loss_task_classifier = nn.functional.cross_entropy(
+                        logits_y_from_z_c_detached, 
+                        labels_batch,
+                        weight=class_weights
+                    )
+                    if scaler is not None:
+                        scaler.scale(loss_task_classifier).backward()
+                        scaler.step(optimizer_classifier)
+                        scaler.update()
+                    else:
+                        loss_task_classifier.backward()
+                        optimizer_classifier.step()
                 
-                # Recompute loss_task with updated classifier
+                # Recompute loss_task with updated classifier (now well-trained)
                 logits_y_from_z_c_updated = model.classifier(output['z_c'])
                 loss_task_updated = nn.functional.cross_entropy(
                     logits_y_from_z_c_updated,
@@ -1049,6 +1141,10 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1
         current_lr = optimizer.param_groups[0]['lr']
         classifier_lr = optimizer_classifier.param_groups[0]['lr']
         
+        # Clear GPU cache periodically to prevent memory fragmentation
+        if torch.cuda.is_available() and epoch % 5 == 0:
+            torch.cuda.empty_cache()
+        
         # Print every epoch (always print all epochs for monitoring)
         random_target_str = f"(→{1.0/num_classes:.3f})" if num_classes > 2 else "(→0.5)"
         per_class_acc_z_d_str = f"PerCls: {history['per_class_acc_z_d'][-1]:.3f}" if len(history['per_class_acc_z_d']) > 0 else ""
@@ -1058,14 +1154,34 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1
         print(f"\nEpoch {epoch:3d}/{num_epochs}")
         print(f"  4 Main Losses: L_task={history['loss_task'][-1]:.4f} | L_adv={history['loss_adv'][-1]:.4f} | L_ortho={history['loss_ortho'][-1]:.4f} | L_rec={history['loss_rec'][-1]:.4f}")
         print(f"  Regularization: L_kl={history['loss_kl'][-1]:.4f} | Total L_enc={avg_loss_enc:.4f}")
+        # Show weighted contributions for debugging
+        weighted_task = lambda_task * history['loss_task'][-1]
+        weighted_adv = lambda_adv * history['loss_adv'][-1]
+        weighted_ortho = lambda_ortho * history['loss_ortho'][-1]
+        weighted_rec = lambda_rec * history['loss_rec'][-1]
+        weighted_kl = lambda_kl * history['loss_kl'][-1]
+        print(f"  Weighted contributions: λ_task*L_task={weighted_task:.4f} | λ_adv*L_adv={weighted_adv:.4f} | λ_ortho*L_ortho={weighted_ortho:.4f} | λ_rec*L_rec={weighted_rec:.4f} | λ_kl*L_kl={weighted_kl:.4f}")
         print(f"  Accuracy: Acc(z_c→y)={history['acc_task_from_z_c'][-1]:.3f} {per_class_acc_z_c_str} (→1.0)")
         print(f"            Acc(z_d→y)={history['acc_task_from_z_d'][-1]:.3f} {per_class_acc_z_d_str} {random_target_str}")
         print(f"  LR: encoder={current_lr:.6f}, classifier={classifier_lr:.6f}")
         
-        # Early stopping
+        # Early stopping and save best model
         if avg_loss_enc < best_loss:
             best_loss = avg_loss_enc
             patience_count = 0
+            # Save best model state
+            best_model_state = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'loss': avg_loss_enc,
+                'acc_z_c': history['acc_task_from_z_c'][-1],
+                'acc_z_d': history['acc_task_from_z_d'][-1],
+                'num_classes': num_classes,
+                'latent_dim': latent_dim,
+                'd_model': 768
+            }
+            best_model_epoch = epoch
+            print(f"  ✓ New best model! Loss: {best_loss:.4f}, Acc(z_c): {history['acc_task_from_z_c'][-1]:.3f}")
         else:
             patience_count += 1
             if patience_count >= patience:
@@ -1088,6 +1204,37 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=1
     print(f"\n  + L_kl (VAE regularization): {history['loss_kl'][-1]:.4f}")
     print(f"\nNOTE: Per-class accuracy is w.r.t. task labels (y), NOT sensitive attributes")
     print(f"{'='*70}")
+    
+    # Save best model
+    if best_model_state is not None:
+        model_dir = f"models/{dataset_name}"
+        os.makedirs(model_dir, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        best_model_path = os.path.join(model_dir, f"best_model_{timestamp}.pth")
+        
+        # Save best model
+        torch.save(best_model_state, best_model_path)
+        print(f"\n✓ Best model saved to: {best_model_path}")
+        print(f"  Epoch: {best_model_epoch}, Loss: {best_loss:.4f}")
+        print(f"  Acc(z_c→y): {best_model_state['acc_z_c']:.3f}, Acc(z_d→y): {best_model_state['acc_z_d']:.3f}")
+        
+        # Also save final model
+        final_model_path = os.path.join(model_dir, f"final_model_{timestamp}.pth")
+        final_model_state = {
+            'epoch': num_epochs,
+            'model_state_dict': model.state_dict(),
+            'loss': history['loss_enc'][-1],
+            'acc_z_c': history['acc_task_from_z_c'][-1],
+            'acc_z_d': history['acc_task_from_z_d'][-1],
+            'num_classes': num_classes,
+            'latent_dim': latent_dim,
+            'd_model': 768,
+            'history': history  # Include full training history
+        }
+        torch.save(final_model_state, final_model_path)
+        print(f"✓ Final model saved to: {final_model_path}")
+    else:
+        print("\n⚠ No best model to save (training may have failed)")
     
     return model, history
 
@@ -1242,8 +1389,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=16 if torch.cuda.is_available() else 8,
-        help=f"Batch size for training (default: {16 if torch.cuda.is_available() else 8} on {'GPU' if torch.cuda.is_available() else 'CPU'})"
+        default=None,  # Auto-detect based on GPU memory
+        help=f"Batch size for training (default: auto-detect based on GPU memory, ~64 for RTX 5090)"
     )
     parser.add_argument(
         "--use-amp",
@@ -1260,14 +1407,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lambda-task",
         type=float,
-        default=1.0,
-        help="Task loss weight (default: 1.0 for balanced training)"
+        default=3.0,
+        help="Task loss weight (default: 3.0 to prioritize learning task from z_c)"
     )
     parser.add_argument(
         "--lambda-adv",
         type=float,
-        default=8.0,
-        help="Adversarial loss weight (increased default to push z_d accuracy to random)"
+        default=3.0,
+        help="Adversarial loss weight (default: 3.0, balanced with task loss)"
     )
     parser.add_argument(
         "--lambda-rec",
@@ -1296,8 +1443,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lr",
         type=float,
-        default=0.001,
-        help="Learning rate"
+        default=2e-5,
+        help="Learning rate for BERT (default: 2e-5, standard for BERT fine-tuning)"
     )
     parser.add_argument(
         "--use-cache",
@@ -1367,6 +1514,23 @@ if __name__ == "__main__":
     if use_cache:
         print("✓ Using cached tokenized data (faster training - no repeated tokenization)")
     print(f"{'='*70}")
+    
+    # Auto-detect optimal batch size based on GPU memory if not specified
+    if args.batch_size is None:
+        if torch.cuda.is_available():
+            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            if gpu_memory_gb >= 30:  # RTX 5090, A100, etc. (30GB+)
+                args.batch_size = 64
+            elif gpu_memory_gb >= 20:  # RTX 4090, etc. (20-30GB)
+                args.batch_size = 32
+            elif gpu_memory_gb >= 10:  # RTX 3080, etc. (10-20GB)
+                args.batch_size = 16
+            else:  # Smaller GPUs (<10GB)
+                args.batch_size = 8
+            print(f"Auto-detected batch size: {args.batch_size} (GPU memory: {gpu_memory_gb:.1f}GB)")
+        else:
+            args.batch_size = 8
+            print(f"Using CPU batch size: {args.batch_size}")
     
     model, history = train_cd_model(
         sentences, labels,

@@ -12,7 +12,10 @@ from transformers import AutoTokenizer
 from sklearn.decomposition import PCA
 import os
 
-device = torch.device("cpu")
+# Auto-detect device from model (will be set in each function)
+def get_device(model):
+    """Get device from model parameters"""
+    return next(model.parameters()).device
 
 
 def is_meaningful_token(token):
@@ -163,6 +166,7 @@ def visualize_reconstruction_and_attention(
     
     # Forward pass
     model.eval()
+    device = get_device(model)
     with torch.no_grad():
         output = model(input_ids, attention_mask)
         z_c = output['z_c']
@@ -172,18 +176,10 @@ def visualize_reconstruction_and_attention(
         reconstructed = output['reconstructed']
         
         # Get original embedding from BERT (pretrained)
-        if model.use_bert:
-            with torch.no_grad():
-                bert_output = model.bert(input_ids=input_ids, attention_mask=attention_mask)
-                original_h = bert_output.last_hidden_state[:, 0, :]  # CLS token
-        else:
-            if model.use_bert:
-                with torch.no_grad():
-                    bert_output = model.bert(input_ids=input_ids, attention_mask=attention_mask)
-                    original_h = bert_output.last_hidden_state[:, 0, :]  # CLS token
-            else:
-                transformer_output = model.transformer(input_ids=input_ids, mask=attention_mask)
-                original_h = transformer_output[:, 0, :]  # CLS token equivalent
+        # Model always uses BERT now (no transformer option)
+        with torch.no_grad():
+            bert_output = model.bert(input_ids=input_ids, attention_mask=attention_mask)
+            original_h = bert_output.last_hidden_state[:, 0, :]  # CLS token
         
     # Get tokens
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
@@ -361,6 +357,7 @@ def visualize_batch_analysis(model, dataloader, num_samples=5, save_dir="visuali
     os.makedirs(save_dir, exist_ok=True)
     
     model.eval()
+    device = get_device(model)
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     
     reconstruction_scores = []
@@ -386,8 +383,8 @@ def visualize_batch_analysis(model, dataloader, num_samples=5, save_dir="visuali
             reconstructed = output['reconstructed']
             
             with torch.no_grad():
-                transformer_output = model.transformer(input_ids=input_ids, mask=attention_mask)
-                original_h = transformer_output[:, 0, :]  # CLS token equivalent
+                bert_output = model.bert(input_ids=input_ids, attention_mask=attention_mask)
+                original_h = bert_output.last_hidden_state[:, 0, :]  # CLS token
             
             for i in range(input_ids.size(0)):
                 if sample_count >= num_samples:
@@ -471,6 +468,7 @@ def compare_original_vs_reconstructed_text(model, dataloader, num_samples=3, sav
     os.makedirs(save_dir, exist_ok=True)
     
     model.eval()
+    device = get_device(model)
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     
     results = []
@@ -490,8 +488,8 @@ def compare_original_vs_reconstructed_text(model, dataloader, num_samples=3, sav
             reconstructed = output['reconstructed']
             
             with torch.no_grad():
-                transformer_output = model.transformer(input_ids=input_ids, mask=attention_mask)
-                original_h = transformer_output[:, 0, :]  # CLS token equivalent
+                bert_output = model.bert(input_ids=input_ids, attention_mask=attention_mask)
+                original_h = bert_output.last_hidden_state[:, 0, :]  # CLS token
             
             for i in range(input_ids.size(0)):
                 if sample_count >= num_samples:
@@ -574,6 +572,7 @@ def visualize_attention_heatmap_batch(model, dataloader, num_samples=50, save_di
     os.makedirs(save_dir, exist_ok=True)
     
     model.eval()
+    device = get_device(model)
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     
     sample_count = 0
@@ -708,6 +707,7 @@ def visualize_latent_space_pca(model, dataloader, num_samples=None, save_dir="vi
     os.makedirs(save_dir, exist_ok=True)
     
     model.eval()
+    device = get_device(model)
     
     z_c_list = []
     z_d_list = []
@@ -845,6 +845,7 @@ def analyze_attention_difference(model, dataloader, num_samples=50, save_dir="vi
     os.makedirs(save_dir, exist_ok=True)
     
     model.eval()
+    device = get_device(model)
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     
     attn_c_list = []
@@ -977,6 +978,7 @@ def visualize_attention_on_text(model, dataloader, num_samples=20, save_dir="vis
     os.makedirs(save_dir, exist_ok=True)
     
     model.eval()
+    device = get_device(model)
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     
     html_content = """
@@ -1148,6 +1150,7 @@ def visualize_attention_comparison(model, dataloader, num_samples=10, save_dir="
     os.makedirs(save_dir, exist_ok=True)
     
     model.eval()
+    device = get_device(model)
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     
     sample_count = 0
