@@ -780,6 +780,17 @@ def visualize_latent_space_pca(model, dataloader, num_samples=None, save_dir="vi
     ax.legend(fontsize=11)
     ax.grid(alpha=0.3)
     
+    # Add note about why visual separation doesn't mean predictive power
+    note_text = (
+        "Note: Visual separation in 2D PCA ≠ Predictive power\n"
+        "z_d may have demographic structure that doesn't\n"
+        "correlate with task label (target: ~50% accuracy)"
+    )
+    ax.text(0.02, 0.98, note_text, transform=ax.transAxes,
+            fontsize=9, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7),
+            family='monospace')
+    
     plt.tight_layout()
     filename = f"{save_dir}/latent_space_pca_2d.png"
     plt.savefig(filename, dpi=150, bbox_inches='tight')
@@ -818,6 +829,57 @@ def visualize_latent_space_pca(model, dataloader, num_samples=None, save_dir="vi
         print(f"  ✓ z_c (Content) has better class separation")
     else:
         print(f"  ⚠️  z_d (Demographic) has better separation (should contain less task info)")
+    
+    # IMPORTANT: Calculate actual predictive power using full-dimensional z_d
+    # This explains why 50% accuracy doesn't mean no structure
+    print(f"\n🔍 Why z_d can show visual separation but still have 50% accuracy:")
+    print(f"  (This is NORMAL and EXPECTED behavior)")
+    
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+    
+    # Test predictive power on FULL z_d (not just 2D PCA)
+    # Split data for testing
+    n_samples = len(z_d_all)
+    n_train = int(0.8 * n_samples)
+    indices = np.random.permutation(n_samples)
+    train_idx = indices[:n_train]
+    test_idx = indices[n_train:]
+    
+    z_d_train = z_d_all[train_idx]
+    z_d_test = z_d_all[test_idx]
+    labels_train = labels_all[train_idx]
+    labels_test = labels_all[test_idx]
+    
+    # Train classifier on full z_d
+    clf_full = LogisticRegression(max_iter=1000, random_state=42)
+    clf_full.fit(z_d_train, labels_train)
+    acc_full = accuracy_score(labels_test, clf_full.predict(z_d_test))
+    
+    # Train classifier on 2D PCA projection of z_d
+    z_d_2d_train = z_d_2d[train_idx]
+    z_d_2d_test = z_d_2d[test_idx]
+    clf_2d = LogisticRegression(max_iter=1000, random_state=42)
+    clf_2d.fit(z_d_2d_train, labels_train)
+    acc_2d = accuracy_score(labels_test, clf_2d.predict(z_d_2d_test))
+    
+    print(f"  ✓ Accuracy using FULL z_d ({z_d_all.shape[1]}D): {acc_full:.3f}")
+    print(f"  ✓ Accuracy using 2D PCA projection: {acc_2d:.3f}")
+    print(f"  ✓ PCA explains only {pca_d.explained_variance_ratio_.sum():.2%} of variance")
+    
+    print(f"\n  💡 Key Insights:")
+    print(f"    1. Visual separation in 2D PCA ≠ Predictive power for task label")
+    print(f"    2. z_d may have demographic structure (age, gender, etc.) that")
+    print(f"       doesn't correlate with task label (credit risk)")
+    print(f"    3. PCA only shows 2 dimensions - most information is in other dimensions")
+    print(f"    4. 50% accuracy means z_d CANNOT predict task label (this is GOOD!)")
+    print(f"    5. But z_d can still have structure for demographic features")
+    
+    if acc_full < 0.55:
+        print(f"\n  ✅ z_d is working correctly: Cannot predict task label (acc={acc_full:.3f} ≈ 50%)")
+    else:
+        print(f"\n  ⚠️  Warning: z_d can predict task label (acc={acc_full:.3f} > 50%)")
+        print(f"     This suggests adversarial training may need adjustment")
     
     return {
         'z_c_2d': z_c_2d,
