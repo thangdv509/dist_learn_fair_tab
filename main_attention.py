@@ -141,7 +141,7 @@ def compute_and_cache_tokenized_data(sentences, dataset_name, max_len=100, force
 
 # ============== DATASET ==============
 class TextDataset(Dataset):
-    def __init__(self, sentences, labels, tokenizer, max_len=50, cached_data=None):
+    def __init__(self, sentences, labels, tokenizer, max_len=256, cached_data=None):
         self.sentences = sentences
         self.labels = labels
         self.tokenizer = tokenizer
@@ -1241,16 +1241,11 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
 
 def save_encodings(model, sentences, labels, dataset_name, tokenizer, max_len=50, cached_data=None):
     """
-    Save z_c and z_d encodings (latent representations) to predicted/{dataset_name}_{timestamp}/ directory.
-    
-    Args:
-        model: Trained CD_Model
-        sentences: List of input sentences
-        labels: List of true labels
-        dataset_name: Name of the dataset
-        tokenizer: Tokenizer for encoding sentences
-        max_len: Maximum sequence length
-        cached_data: Cached tokenized data (optional)
+    Save:
+      - z_c, z_d (latent reps) for all samples
+      - attn_c, attn_d attention weights for all samples (per token position)
+      - input_ids, attention_mask so you can decode tokens later
+    into predicted/{dataset_name}_{timestamp}/
     """
     try:
         import pandas as pd
@@ -1259,36 +1254,42 @@ def save_encodings(model, sentences, labels, dataset_name, tokenizer, max_len=50
         import subprocess
         subprocess.check_call(["pip", "install", "pandas"])
         import pandas as pd
+
     from torch.utils.data import DataLoader
-    
+    import json
+
     # Create output directory with timestamp
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     pred_dir = os.path.join("predicted", f"{dataset_name}_{timestamp}")
     os.makedirs(pred_dir, exist_ok=True)
-    
+
     print(f"\n{'='*70}")
-    print(f"SAVING ENCODINGS - {dataset_name}")
+    print(f"SAVING ENCODINGS + ATTENTION - {dataset_name}")
     print(f"{'='*70}")
-    print(f"Saving z_c and z_d encodings to: {pred_dir}")
-    
+    print(f"Saving outputs to: {pred_dir}")
+
     # Create dataset and dataloader
     dataset = TextDataset(sentences, labels, tokenizer, max_len=max_len, cached_data=cached_data)
     num_workers = 4 if torch.cuda.is_available() else 0
     pin_memory = torch.cuda.is_available()
     dataloader = DataLoader(
-        dataset, 
-        batch_size=32, 
+        dataset,
+        batch_size=32,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory
     )
-    
-    # Collect all encodings
+
     all_texts = []
     all_true_labels = []
+    all_input_ids = []
+    all_attention_mask = []
+
     all_z_c = []
     all_z_d = []
-    
+    all_attn_c = []
+    all_attn_d = []
+
     model.eval()
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
@@ -1296,78 +1297,109 @@ def save_encodings(model, sentences, labels, dataset_name, tokenizer, max_len=50
             attention_mask = batch['attention_mask'].to(device)
             labels_batch = batch['label'].cpu().numpy()
             texts = batch['text']
-            
-            # Get encodings (z_c and z_d)
+
             output = model(input_ids, attention_mask)
-            
-            # Extract z_c and z_d embeddings
-            z_c = output['z_c'].cpu().numpy()  # [batch_size, latent_dim]
-            z_d = output['z_d'].cpu().numpy()  # [batch_size, latent_dim]
-            
-            # Store results
-            all_texts.extend(texts)
+
+            # Latents
+            z_c = output['z_c'].detach().cpu().numpy()       # [B, latent_dim]
+            z_d = output['z_d'].detach().cpu().numpy()       # [B, latent_dim]
+
+            # Attention weights (already masked-softmax; padding positions ~=0)
+            attn_c = output['attn_c'].detach().cpu().numpy() # [B, seq_len]
+            attn_d = output['attn_d'].detach().cpu().numpy() # [B, seq_len]
+
+            # Save batch-level raw tokenization too (for decoding later)
+            all_input_ids.append(input_ids.detach().cpu().numpy())         # [B, seq_len]
+            all_attention_mask.append(attention_mask.detach().cpu().numpy())  # [B, seq_len]
+
+            all_texts.extend(list(texts))
             all_true_labels.extend(labels_batch.tolist())
-            all_z_c.extend(z_c.tolist())
-            all_z_d.extend(z_d.tolist())
-    
-    # Create DataFrame with z_c and z_d dimensions as columns
-    # z_c and z_d are now 768-dim BERT embeddings (not reduced)
-    embedding_dim = z_c.shape[1]  # Should be 768
-    
-    # Prepare z_c and z_d columns
-    z_c_cols = {f'z_c_dim_{i}': [z[i] for z in all_z_c] for i in range(embedding_dim)}
-    z_d_cols = {f'z_d_dim_{i}': [z[i] for z in all_z_d] for i in range(embedding_dim)}
-    
-    df = pd.DataFrame({
-        'text': all_texts,
-        'true_label': all_true_labels,
-        **z_c_cols,
-        **z_d_cols
-    })
-    
-    # Save to CSV
-    csv_path = os.path.join(pred_dir, "encodings.csv")
-    df.to_csv(csv_path, index=False)
-    print(f"✓ Saved encodings to: {csv_path}")
-    print(f"  Total samples: {len(df)}")
-    print(f"  z_c dimension: {embedding_dim} (BERT embedding)")
-    print(f"  z_d dimension: {embedding_dim} (BERT embedding)")
-    
-    # Save as numpy arrays for easier loading
-    np_z_c = np.array(all_z_c)
-    np_z_d = np.array(all_z_d)
+
+            all_z_c.append(z_c)
+            all_z_d.append(z_d)
+            all_attn_c.append(attn_c)
+            all_attn_d.append(attn_d)
+
+    # Stack arrays
+    np_input_ids = np.concatenate(all_input_ids, axis=0)          # [N, seq_len]
+    np_attention_mask = np.concatenate(all_attention_mask, axis=0)# [N, seq_len]
+    np_z_c = np.concatenate(all_z_c, axis=0)                      # [N, latent_dim]
+    np_z_d = np.concatenate(all_z_d, axis=0)                      # [N, latent_dim]
+    np_attn_c = np.concatenate(all_attn_c, axis=0)                # [N, seq_len]
+    np_attn_d = np.concatenate(all_attn_d, axis=0)                # [N, seq_len]
     np_labels = np.array(all_true_labels)
-    
-    np.save(os.path.join(pred_dir, "z_c.npy"), np_z_c)
-    np.save(os.path.join(pred_dir, "z_d.npy"), np_z_d)
-    np.save(os.path.join(pred_dir, "labels.npy"), np_labels)
-    print(f"✓ Saved numpy arrays:")
-    print(f"  - z_c.npy: shape {np_z_c.shape}")
-    print(f"  - z_d.npy: shape {np_z_d.shape}")
-    print(f"  - labels.npy: shape {np_labels.shape}")
-    
-    # Save summary
+
+    N, seq_len = np_input_ids.shape
+    latent_dim = np_z_c.shape[1]
+
+    # ===== Save NPY files (fast to reload) =====
+    np.save(os.path.join(pred_dir, "input_ids.npy"), np_input_ids.astype(np.int32))
+    np.save(os.path.join(pred_dir, "attention_mask.npy"), np_attention_mask.astype(np.int8))
+    np.save(os.path.join(pred_dir, "labels.npy"), np_labels.astype(np.int64))
+
+    np.save(os.path.join(pred_dir, "z_c.npy"), np_z_c.astype(np.float32))
+    np.save(os.path.join(pred_dir, "z_d.npy"), np_z_d.astype(np.float32))
+
+    # Attention weights
+    np.save(os.path.join(pred_dir, "attn_c.npy"), np_attn_c.astype(np.float32))
+    np.save(os.path.join(pred_dir, "attn_d.npy"), np_attn_d.astype(np.float32))
+
+    print("✓ Saved numpy arrays:")
+    print(f"  - input_ids.npy:       {np_input_ids.shape}")
+    print(f"  - attention_mask.npy:  {np_attention_mask.shape}")
+    print(f"  - labels.npy:          {np_labels.shape}")
+    print(f"  - z_c.npy:             {np_z_c.shape}")
+    print(f"  - z_d.npy:             {np_z_d.shape}")
+    print(f"  - attn_c.npy:          {np_attn_c.shape}")
+    print(f"  - attn_d.npy:          {np_attn_d.shape}")
+
+    # ===== Optional: lightweight CSV (text + label only) =====
+    meta_df = pd.DataFrame({
+        "text": all_texts,
+        "true_label": all_true_labels
+    })
+    meta_csv_path = os.path.join(pred_dir, "meta.csv")
+    meta_df.to_csv(meta_csv_path, index=False)
+    print(f"✓ Saved meta to: {meta_csv_path}")
+
+    # ===== Optional: full encodings CSV (WARNING: huge if latent_dim large) =====
+    # If you still want: uncomment this block. For latent_dim=64 it's okay.
+    save_full_csv = True
+    if save_full_csv:
+        zc_cols = {f"z_c_dim_{i}": np_z_c[:, i] for i in range(latent_dim)}
+        zd_cols = {f"z_d_dim_{i}": np_z_d[:, i] for i in range(latent_dim)}
+        df = pd.DataFrame({"text": all_texts, "true_label": all_true_labels, **zc_cols, **zd_cols})
+        csv_path = os.path.join(pred_dir, "encodings.csv")
+        df.to_csv(csv_path, index=False)
+        print(f"✓ Saved encodings to: {csv_path} (latent_dim={latent_dim})")
+
+    # ===== Summary JSON =====
     summary = {
-        'dataset': dataset_name,
-        'timestamp': timestamp,
-        'total_samples': len(df),
-        'embedding_dim': int(embedding_dim),
-        'z_c_shape': list(np_z_c.shape),
-        'z_d_shape': list(np_z_d.shape),
-        'note': 'z_c and z_d are 768-dim BERT embeddings (not reduced)'
+        "dataset": dataset_name,
+        "timestamp": timestamp,
+        "total_samples": int(N),
+        "seq_len": int(seq_len),
+        "latent_dim": int(latent_dim),
+        "files": {
+            "meta_csv": "meta.csv",
+            "encodings_csv": "encodings.csv" if save_full_csv else None,
+            "input_ids": "input_ids.npy",
+            "attention_mask": "attention_mask.npy",
+            "labels": "labels.npy",
+            "z_c": "z_c.npy",
+            "z_d": "z_d.npy",
+            "attn_c": "attn_c.npy",
+            "attn_d": "attn_d.npy"
+        },
+        "note": "attn_* are attention pooling weights over token positions (length=seq_len). Use input_ids + tokenizer to decode tokens."
     }
-    
-    # Save summary as JSON
-    import json
     summary_path = os.path.join(pred_dir, "summary.json")
-    with open(summary_path, 'w') as f:
+    with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"✓ Saved summary to: {summary_path}")
-    
-    print(f"{'='*70}\n")
-    
-    return pred_dir
 
+    print(f"{'='*70}\n")
+    return pred_dir
 
 # ============== MAIN ==============
 if __name__ == "__main__":
@@ -1503,10 +1535,10 @@ if __name__ == "__main__":
     cached_data_full = None
     if use_cache:
         cached_data_full = compute_and_cache_tokenized_data(
-            sentences, args.dataset, max_len=50, force_recompute=args.force_recompute_cache
+            sentences, args.dataset, max_len=256, force_recompute=args.force_recompute_cache
         )
     
-    full_dataset = TextDataset(sentences, labels, tokenizer, max_len=50, cached_data=cached_data_full)
+    full_dataset = TextDataset(sentences, labels, tokenizer, max_len=256, cached_data=cached_data_full)
     
     # Train
     print(f"\n{'='*70}")
@@ -1560,7 +1592,7 @@ if __name__ == "__main__":
     vis_labels = [labels[i] for i in vis_indices]
     
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-    vis_dataset = TextDataset(vis_sentences, vis_labels, tokenizer, max_len=50)
+    vis_dataset = TextDataset(vis_sentences, vis_labels, tokenizer, max_len=256)
     vis_dataloader = DataLoader(vis_dataset, batch_size=1, shuffle=False)
     
     # Visualize
@@ -1610,7 +1642,7 @@ if __name__ == "__main__":
     print(f"{'='*70}")
     pred_dir = save_encodings(
         model, sentences, labels, args.dataset, tokenizer, 
-        max_len=50, cached_data=cached_data_full
+        max_len=256, cached_data=cached_data_full
     )
     
     print(f"\n{'='*70}")
