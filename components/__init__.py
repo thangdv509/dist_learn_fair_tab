@@ -2,7 +2,8 @@
 Components module for fairness learning with disentangled representations.
 """
 
-from .models import CD_Model, TaskClassifier, AdversarialClassifier, ContentDecoder, DemographicDecoder, ContentHead, DemographicHead, GRL, device
+from .models import CD_Model, TaskClassifier, AdversarialClassifier, ContentDecoder, DemographicDecoder, ContentHead, DemographicHead, GRL
+from .utils import device, get_device
 from .dataset import TextDataset
 from .losses import (
     compute_kl_loss,
@@ -28,6 +29,7 @@ __all__ = [
     'DemographicHead',
     'GRL',
     'device',
+    'get_device',
     'TextDataset',
     'compute_kl_loss',
     'compute_reconstruction_loss',

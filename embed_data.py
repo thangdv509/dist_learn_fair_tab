@@ -18,8 +18,9 @@ from data_loader import load_dataset_generic
 from main_attention import CD_Model, TextDataset, compute_and_cache_tokenized_data
 from torch.utils.data import DataLoader
 
-# Auto-detect device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Auto-detect device (use standard utility function)
+from components.utils import get_device
+device = get_device()
 print(f"Using device: {device}")
 
 
@@ -58,8 +59,9 @@ def load_model(model_path, device=device):
         try:
             import safetensors.torch
             print(f"  Loading from safetensors format: {safetensors_path}")
-            # Load state_dict from safetensors
-            state_dict = safetensors.torch.load_file(safetensors_path)
+            # Load state_dict from safetensors to CPU first (handles GPU/CPU mismatch)
+            # Safetensors supports device parameter: 'cpu', 'cuda', 'cuda:0', etc.
+            state_dict = safetensors.torch.load_file(safetensors_path, device='cpu')
             
             # Load metadata from .pth file (metadata is always saved in .pth)
             # If .pth is corrupted, use default values

@@ -7,7 +7,8 @@ import torch.nn as nn
 from transformers import AutoModel
 
 # Auto-detect device: use CUDA if available, otherwise CPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Import from utils to ensure consistency across all files
+from .utils import device
 
 
 # ============== GRADIENT REVERSAL LAYER ==============

@@ -9,8 +9,25 @@ import torch
 from torch.utils.data import DataLoader
 import json
 
-from .models import device
 from .dataset import TextDataset
+
+# Auto-detect device: use CUDA if available, otherwise CPU
+# This is the standard way to detect device across all files
+def get_device():
+    """
+    Auto-detect and return the best available device.
+    
+    Returns:
+        torch.device: 'cuda' if GPU is available, otherwise 'cpu'
+    
+    Example:
+        device = get_device()
+        model = model.to(device)
+    """
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# For backward compatibility, also export as 'device' variable
+device = get_device()
 
 
 def save_encodings(model, sentences, labels, dataset_name, tokenizer, max_len=256, cached_data=None):
@@ -62,10 +79,12 @@ def save_encodings(model, sentences, labels, dataset_name, tokenizer, max_len=25
     all_attn_d = []
 
     model.eval()
+    # Get device from model (model is already on the correct device)
+    model_device = next(model.parameters()).device
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
+            input_ids = batch['input_ids'].to(model_device)
+            attention_mask = batch['attention_mask'].to(model_device)
             labels_batch = batch['label'].cpu().numpy()
             texts = batch['text']
 

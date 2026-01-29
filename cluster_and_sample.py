@@ -660,7 +660,9 @@ Note: This script:
     
     # Load model
     import torch
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from embed_data import load_model
+    from components.utils import get_device
+    device = get_device()
     print(f"\nLoading model on device: {device}")
     model, model_info = load_model(model_path, device)
     
