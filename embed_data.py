@@ -37,23 +37,50 @@ def load_model(model_path, device=device):
     """
     print(f"\nLoading model from: {model_path}")
     
-    checkpoint = torch.load(model_path, map_location=device)
+    # Check if file exists and is readable
+    import os
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    file_size = os.path.getsize(model_path)
+    if file_size == 0:
+        raise ValueError(f"Model file is empty: {model_path}")
+    
+    print(f"  File size: {file_size / (1024*1024):.2f} MB")
+    
+    try:
+        # Always load to CPU first to handle GPU/CPU mismatch
+        # This allows loading models trained on GPU on CPU (and vice versa)
+        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+    except RuntimeError as e:
+        if "failed finding central directory" in str(e) or "zip archive" in str(e):
+            raise RuntimeError(
+                f"Model file appears to be corrupted: {model_path}\n"
+                f"Error: {e}\n"
+                f"Please check if the file was saved completely. "
+                f"You may need to retrain the model or use a different checkpoint."
+            ) from e
+        else:
+            raise
     
     # Extract model parameters
     num_classes = checkpoint.get('num_classes', 2)
     latent_dim = checkpoint.get('latent_dim', 64)
     d_model = checkpoint.get('d_model', 768)
     
-    # Create model with same architecture
+    # Create model with same architecture (on CPU first)
     model = CD_Model(
         num_classes=num_classes,
         d_model=d_model,
         latent_dim=latent_dim,
         freeze_bert=False
-    ).to(device)
+    )
     
-    # Load state dict
+    # Load state dict (on CPU)
     model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # Move model to target device after loading
+    model = model.to(device)
     model.eval()  # Set to evaluation mode
     
     # Extract model info

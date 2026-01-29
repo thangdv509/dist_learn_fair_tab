@@ -10,9 +10,23 @@ import torch.nn.functional as F
 def compute_kl_loss(mu, logvar):
     """
     Compute KL divergence loss: KL(q(z|x) || p(z)) where p(z) = N(0, I)
+    
+    This regularizes the latent distribution to follow standard normal N(0,I), which:
+    1. Ensures smooth latent space (good interpolation between points)
+    2. Enables proper sampling (can sample z ~ N(0,I) and decode to generate realistic data)
+    3. Prevents sampling outside the learned manifold (normalized distribution)
+    
     Normalized by batch size to match scale of other losses (CE, MSE, etc.)
+    
+    Args:
+        mu: Mean of latent distribution [batch_size, latent_dim]
+        logvar: Log variance of latent distribution [batch_size, latent_dim]
+    
+    Returns:
+        KL divergence loss (scalar tensor)
     """
     # KL divergence per sample: -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
+    # Formula: KL = -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
     # Shape: [batch_size, latent_dim] -> [batch_size] -> scalar (mean)
     kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
     return torch.mean(kl_per_sample)  # Normalize by batch size

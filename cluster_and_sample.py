@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-Script to perform K-means clustering on z_c embeddings from ORIGINAL data, 
+Script to perform K-means clustering on z_d embeddings from processed_data, 
 find optimal K, and sample representative sentences from each cluster.
 
-This is for clustering ORIGINAL training data to understand data distribution
-and sample representative examples for synthetic data generation.
+This script:
+1. Reads data from processed_data/{dataset_name}.csv
+2. Loads the corresponding best_model from models/{dataset_name}/
+3. Generates z_d embeddings using the model
+4. Clusters based on z_d
+5. Finds optimal number of clusters
+6. Samples n samples from each cluster
 
-Usage (with pre-computed embeddings):
+Usage:
     python cluster_and_sample.py \
-        --embeddings embeddings/original_z_c.npy \
-        --sentences embeddings/original.csv \
-        --output-dir sampled_data \
-        --n-examples 10
-
-Usage (auto-embed from dataset):
-    python cluster_and_sample.py \
-        --model-path models/dataset/best_model.pth \
         --dataset german-credit-data \
         --output-dir sampled_data \
         --n-examples 10
@@ -48,16 +45,121 @@ except ImportError:
     DATA_LOADER_AVAILABLE = False
 
 
+def find_best_model_path(dataset_name, models_dir="models"):
+    """
+    Find the best_model file for a given dataset.
+    Looks for best_model_*.pth in models/{dataset_name}/ directory.
+    Falls back to final_model_*.pth if best_model is not found or corrupted.
+    
+    Args:
+        dataset_name: Name of dataset (e.g., 'german-credit-data')
+        models_dir: Directory containing model folders (default: 'models')
+    
+    Returns:
+        Path to best_model file, or None if not found
+    """
+    import glob
+    
+    model_dir = os.path.join(models_dir, dataset_name)
+    if not os.path.exists(model_dir):
+        return None
+    
+    # First try to find best_model files
+    pattern = os.path.join(model_dir, "best_model_*.pth")
+    matches = glob.glob(pattern)
+    
+    if matches:
+        # Try all best_model files, return the first one that is not corrupted
+        best_model_paths = sorted(matches, key=os.path.getmtime, reverse=True)  # Most recent first
+        
+        for best_model_path in best_model_paths:
+            # Verify the file is not corrupted by checking if it can be loaded
+            try:
+                import torch
+                torch.load(best_model_path, map_location='cpu', weights_only=False)
+                print(f"✓ Found valid best_model: {best_model_path}")
+                return best_model_path
+            except (RuntimeError, Exception) as e:
+                print(f"⚠ Warning: best_model file appears corrupted: {best_model_path}")
+                print(f"  Error: {e}")
+                continue  # Try next best_model file
+    
+    # Fallback to final_model if best_model is not found or all are corrupted
+    pattern = os.path.join(model_dir, "final_model_*.pth")
+    matches = glob.glob(pattern)
+    
+    if matches:
+        # Try all final_model files, return the first one that is not corrupted
+        final_model_paths = sorted(matches, key=os.path.getmtime, reverse=True)  # Most recent first
+        
+        for final_model_path in final_model_paths:
+            try:
+                import torch
+                torch.load(final_model_path, map_location='cpu', weights_only=False)
+                print(f"✓ Found valid final_model: {final_model_path}")
+                return final_model_path
+            except (RuntimeError, Exception) as e:
+                print(f"⚠ Warning: final_model file appears corrupted: {final_model_path}")
+                print(f"  Error: {e}")
+                continue  # Try next final_model file
+    
+    return None
+
+
 def load_embeddings(embeddings_path):
-    """Load z_c embeddings from numpy file."""
+    """Load z_d embeddings from numpy file."""
     print(f"Loading embeddings from: {embeddings_path}")
-    z_c = np.load(embeddings_path)
-    print(f"✓ Loaded embeddings: shape {z_c.shape}")
-    return z_c
+    z_d = np.load(embeddings_path)
+    print(f"✓ Loaded embeddings: shape {z_d.shape}")
+    return z_d
+
+
+def load_processed_data(dataset_name, processed_data_dir="processed_data"):
+    """
+    Load processed data from processed_data/{dataset_name}.csv
+    
+    Args:
+        dataset_name: Name of dataset (e.g., 'german-credit-data')
+        processed_data_dir: Directory containing processed data (default: 'processed_data')
+    
+    Returns:
+        sentences: List of sentences
+        labels: List of labels (or None if not available)
+        df: DataFrame with the data
+    """
+    csv_path = os.path.join(processed_data_dir, f"{dataset_name}.csv")
+    
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(
+            f"Processed data file not found: {csv_path}\n"
+            f"Please ensure the file exists in {processed_data_dir}/ directory."
+        )
+    
+    print(f"Loading processed data from: {csv_path}")
+    df = pd.read_csv(csv_path)
+    
+    # Try different column names for sentences
+    if 'sentence' in df.columns:
+        sentences = df['sentence'].tolist()
+    elif 'text' in df.columns:
+        sentences = df['text'].tolist()
+    elif len(df.columns) == 1:
+        sentences = df.iloc[:, 0].tolist()
+    else:
+        raise ValueError(f"Could not find 'sentence' or 'text' column in CSV. Available columns: {df.columns.tolist()}")
+    
+    # Load labels if available
+    labels = df['label'].tolist() if 'label' in df.columns else None
+    
+    print(f"✓ Loaded {len(sentences)} sentences")
+    if labels is not None:
+        print(f"✓ Loaded {len(labels)} labels")
+    
+    return sentences, labels, df
 
 
 def load_sentences(sentences_path):
-    """Load sentences from CSV file."""
+    """Load sentences from CSV file (legacy function for backward compatibility)."""
     print(f"Loading sentences from: {sentences_path}")
     df = pd.read_csv(sentences_path)
     
@@ -81,12 +183,12 @@ def load_sentences(sentences_path):
     return sentences, labels, df
 
 
-def find_optimal_k(z_c, max_k=20, min_k=2, method='silhouette'):
+def find_optimal_k(z_d, max_k=20, min_k=2, method='silhouette'):
     """
     Find optimal number of clusters using elbow method or silhouette score.
     
     Args:
-        z_c: Embeddings array [n_samples, latent_dim]
+        z_d: Embeddings array [n_samples, latent_dim] (z_d embeddings for clustering)
         max_k: Maximum K to test
         min_k: Minimum K to test
         method: 'silhouette', 'elbow', or 'davies_bouldin'
@@ -97,7 +199,7 @@ def find_optimal_k(z_c, max_k=20, min_k=2, method='silhouette'):
     """
     print(f"\nFinding optimal K (testing K={min_k} to {max_k})...")
     
-    n_samples = z_c.shape[0]
+    n_samples = z_d.shape[0]
     max_k = min(max_k, n_samples - 1)  # Can't have more clusters than samples
     
     k_range = range(min_k, max_k + 1)
@@ -108,21 +210,21 @@ def find_optimal_k(z_c, max_k=20, min_k=2, method='silhouette'):
     for k in k_range:
         print(f"  Testing K={k}...", end=' ', flush=True)
         kmeans = KMeans(n_clusters=k, random_state=42, n_init=10, max_iter=300)
-        labels = kmeans.fit_predict(z_c)
+        labels = kmeans.fit_predict(z_d)
         
         inertia = kmeans.inertia_
         inertias.append(inertia)
         
         # Silhouette score (higher is better, range: -1 to 1)
         if k > 1:
-            sil_score = silhouette_score(z_c, labels)
+            sil_score = silhouette_score(z_d, labels)
             silhouette_scores.append(sil_score)
         else:
             silhouette_scores.append(-1)
         
         # Davies-Bouldin score (lower is better)
         if k > 1:
-            db_score = davies_bouldin_score(z_c, labels)
+            db_score = davies_bouldin_score(z_d, labels)
             davies_bouldin_scores.append(db_score)
         else:
             davies_bouldin_scores.append(float('inf'))
@@ -250,12 +352,12 @@ def plot_k_selection(scores, output_dir):
     plt.close()
 
 
-def cluster_and_sample(z_c, sentences, labels=None, k=None, n_examples=10, random_state=42):
+def cluster_and_sample(z_d, sentences, labels=None, k=None, n_examples=10, random_state=42):
     """
-    Perform K-means clustering and sample examples from each cluster.
+    Perform K-means clustering on z_d embeddings and sample examples from each cluster.
     
     Args:
-        z_c: Embeddings [n_samples, latent_dim]
+        z_d: Embeddings [n_samples, latent_dim] (z_d embeddings for clustering)
         sentences: List of sentences
         labels: Optional labels
         k: Number of clusters (if None, will find optimal)
@@ -268,12 +370,12 @@ def cluster_and_sample(z_c, sentences, labels=None, k=None, n_examples=10, rando
     if k is None:
         raise ValueError("k must be specified")
     
-    print(f"\nPerforming K-means clustering with K={k}...")
+    print(f"\nPerforming K-means clustering with K={k} on z_d embeddings...")
     np.random.seed(random_state)
     
-    # K-means clustering
+    # K-means clustering on z_d
     kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=10, max_iter=300)
-    cluster_labels = kmeans.fit_predict(z_c)
+    cluster_labels = kmeans.fit_predict(z_d)
     
     # Get cluster statistics
     unique_clusters, counts = np.unique(cluster_labels, return_counts=True)
@@ -293,7 +395,7 @@ def cluster_and_sample(z_c, sentences, labels=None, k=None, n_examples=10, rando
         
         # Get sampled data
         sampled_sentences = [sentences[i] for i in sampled_indices]
-        sampled_z_c = z_c[sampled_indices]
+        sampled_z_d = z_d[sampled_indices]
         
         cluster_data = {
             'cluster_id': int(cluster_id),
@@ -301,7 +403,7 @@ def cluster_and_sample(z_c, sentences, labels=None, k=None, n_examples=10, rando
             'n_sampled': int(n_sample),
             'indices': sampled_indices.tolist(),
             'sentences': sampled_sentences,
-            'z_c': sampled_z_c.tolist(),
+            'z_d': sampled_z_d.tolist(),
             'centroid': kmeans.cluster_centers_[cluster_id].tolist()
         }
         
@@ -383,53 +485,43 @@ def save_clustered_data(clusters, cluster_labels, sentences, labels=None, output
 
 def main():
     parser = argparse.ArgumentParser(
-        description="K-means clustering on ORIGINAL data z_c embeddings and sample sentences",
+        description="K-means clustering on z_d embeddings from processed_data and sample sentences",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Option 1: Use pre-computed embeddings (from original data)
+  # Main usage: Read from processed_data and use best_model
   python cluster_and_sample.py \\
-      --embeddings embeddings/original_z_c.npy \\
-      --sentences embeddings/original.csv \\
-      --output-dir sampled_data \\
-      --n-examples 10
-
-  # Option 2: Auto-embed original dataset
-  python cluster_and_sample.py \\
-      --model-path models/german-credit-data/best_model.pth \\
       --dataset german-credit-data \\
       --output-dir sampled_data \\
       --n-examples 10
 
-Note: This script is for clustering ORIGINAL training data.
-      Use embed_data.py for embedding SYNTHETIC data after generation.
+  # With custom model path
+  python cluster_and_sample.py \\
+      --dataset german-credit-data \\
+      --model-path models/german-credit-data/best_model_20260128_143044.pth \\
+      --output-dir sampled_data \\
+      --n-examples 10
+
+Note: This script:
+  1. Reads data from processed_data/{dataset_name}.csv
+  2. Loads best_model from models/{dataset_name}/
+  3. Generates z_d embeddings
+  4. Clusters based on z_d
+  5. Finds optimal K and samples n examples from each cluster
         """
     )
     
-    # Two modes: pre-computed embeddings OR auto-embed from dataset
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--embeddings",
-        type=str,
-        help="Path to z_c embeddings numpy file (.npy) - use with --sentences"
-    )
-    group.add_argument(
-        "--model-path",
-        type=str,
-        help="Path to trained model (.pth) - use with --dataset to auto-embed original data"
-    )
-    
-    parser.add_argument(
-        "--sentences",
-        type=str,
-        default=None,
-        help="Path to sentences CSV file (required if using --embeddings)"
-    )
     parser.add_argument(
         "--dataset",
         type=str,
+        required=True,
+        help="Dataset name (e.g., 'german-credit-data') - will read from processed_data/{dataset}.csv"
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
         default=None,
-        help="Dataset name (e.g., 'german-credit-data') - required if using --model-path"
+        help="Path to trained model (.pth). If not specified, will auto-find best_model in models/{dataset}/"
     )
     parser.add_argument(
         "--output-dir",
@@ -484,85 +576,119 @@ Note: This script is for clustering ORIGINAL training data.
     args = parser.parse_args()
     
     print("="*70)
-    print("K-MEANS CLUSTERING AND SAMPLING (ORIGINAL DATA)")
+    print("K-MEANS CLUSTERING AND SAMPLING (z_d embeddings)")
     print("="*70)
-    print("NOTE: This script clusters ORIGINAL training data.")
-    print("      Use embed_data.py for SYNTHETIC data after generation.")
+    print("This script:")
+    print("  1. Reads data from processed_data/{dataset}.csv")
+    print("  2. Loads best_model from models/{dataset}/")
+    print("  3. Generates z_d embeddings")
+    print("  4. Clusters based on z_d")
+    print("  5. Finds optimal K and samples n examples from each cluster")
     print("="*70)
     
-    # Two modes: pre-computed embeddings OR auto-embed
-    if args.embeddings:
-        # Mode 1: Use pre-computed embeddings
-        if not args.sentences:
-            parser.error("--sentences is required when using --embeddings")
-        
-        print("\n[Mode 1] Using pre-computed embeddings...")
-        z_c = load_embeddings(args.embeddings)
-        sentences, labels, df = load_sentences(args.sentences)
-        
-    elif args.model_path:
-        # Mode 2: Auto-embed from dataset
-        if not args.dataset:
-            parser.error("--dataset is required when using --model-path")
-        
-        if not EMBED_AVAILABLE:
-            raise ImportError("Cannot import embed_data. Please install dependencies or use --embeddings mode.")
-        if not DATA_LOADER_AVAILABLE:
-            raise ImportError("Cannot import data_loader. Please check data_loader.py exists.")
-        
-        print("\n[Mode 2] Auto-embedding original dataset...")
-        print(f"  Model: {args.model_path}")
-        print(f"  Dataset: {args.dataset}")
-        
-        # Load model
-        import torch
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model, model_info = load_model(args.model_path, device)
-        
-        # Load original dataset
-        print(f"\nLoading original dataset: {args.dataset}")
-        if args.dataset == "german-credit-data":
-            sentences, labels, data, _ = load_german_credit_data_balanced(n_samples=None)
-        else:
-            sentences, labels, data, _ = load_dataset_generic(args.dataset)
-        
-        print(f"✓ Loaded {len(sentences)} original samples")
-        
-        # Embed original data
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-        
-        z_c, z_d, attn_c, attn_d = embed_data(
-            model=model,
-            sentences=sentences,
-            tokenizer=tokenizer,
-            max_len=50,
-            batch_size=32,
-            use_cache=True,
-            dataset_name=f"{args.dataset}_original"
-        )
-        
-        print(f"✓ Embedded {len(sentences)} original samples")
-        
-        # Create DataFrame for compatibility
-        labels_list = labels if labels is not None else [0] * len(sentences)
-        df = pd.DataFrame({
-            'sentence': sentences,
-            'label': labels_list
-        })
-        labels = labels_list  # Set labels variable for later use
-        
+    if not EMBED_AVAILABLE:
+        raise ImportError("Cannot import embed_data. Please install dependencies.")
+    
+    # Find or use provided model path
+    if args.model_path is None:
+        print(f"\nAuto-finding best_model for dataset: {args.dataset}")
+        model_path = find_best_model_path(args.dataset)
+        if model_path is None:
+            raise FileNotFoundError(
+                f"Could not find a valid model for dataset '{args.dataset}'.\n"
+                f"Looked in: models/{args.dataset}/\n"
+                f"Tried: best_model_*.pth and final_model_*.pth\n"
+                f"Please specify --model-path or ensure a valid model exists.\n"
+                f"If models are corrupted, you may need to retrain."
+            )
+        print(f"✓ Found model: {model_path}")
     else:
-        parser.error("Must specify either --embeddings or --model-path")
+        model_path = args.model_path
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        
+        # Verify the model file is not corrupted
+        try:
+            import torch
+            torch.load(model_path, map_location='cpu', weights_only=False)
+            print(f"✓ Model file verified: {model_path}")
+        except (RuntimeError, Exception) as e:
+            if "failed finding central directory" in str(e) or "zip archive" in str(e):
+                # Try to find alternative model files in the same directory
+                model_dir = os.path.dirname(model_path)
+                dataset_name = os.path.basename(model_dir)
+                print(f"\n⚠ Provided model file is corrupted: {model_path}")
+                print(f"  Error: {e}")
+                print(f"  Attempting to find alternative model files...")
+                
+                # Try to find best_model or final_model in the same directory
+                import glob
+                alt_patterns = [
+                    os.path.join(model_dir, "best_model_*.pth"),
+                    os.path.join(model_dir, "final_model_*.pth")
+                ]
+                
+                for pattern in alt_patterns:
+                    matches = glob.glob(pattern)
+                    if matches:
+                        # Try files in reverse chronological order
+                        for alt_path in sorted(matches, key=os.path.getmtime, reverse=True):
+                            try:
+                                torch.load(alt_path, map_location='cpu', weights_only=False)
+                                print(f"✓ Found alternative valid model: {alt_path}")
+                                model_path = alt_path
+                                break
+                            except Exception:
+                                continue
+                        if model_path != args.model_path:  # Found alternative
+                            break
+                
+                if model_path == args.model_path:  # No alternative found
+                    raise RuntimeError(
+                        f"Model file appears to be corrupted: {model_path}\n"
+                        f"Error: {e}\n"
+                        f"Please use a different model file or retrain the model."
+                    ) from e
+            else:
+                raise
+        
+        print(f"\nUsing model: {model_path}")
+    
+    # Load processed data
+    print(f"\nLoading processed data for dataset: {args.dataset}")
+    sentences, labels, df = load_processed_data(args.dataset)
+    
+    # Load model
+    import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\nLoading model on device: {device}")
+    model, model_info = load_model(model_path, device)
+    
+    # Generate z_d embeddings
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    
+    print(f"\nGenerating z_d embeddings for {len(sentences)} sentences...")
+    z_c, z_d, attn_c, attn_d = embed_data(
+        model=model,
+        sentences=sentences,
+        tokenizer=tokenizer,
+        max_len=256,
+        batch_size=32,
+        use_cache=True,
+        dataset_name=f"{args.dataset}_clustering"
+    )
+    
+    print(f"✓ Generated z_d embeddings: shape {z_d.shape}")
     
     # Verify dimensions match
-    if len(sentences) != z_c.shape[0]:
-        raise ValueError(f"Mismatch: {len(sentences)} sentences but {z_c.shape[0]} embeddings")
+    if len(sentences) != z_d.shape[0]:
+        raise ValueError(f"Mismatch: {len(sentences)} sentences but {z_d.shape[0]} embeddings")
     
     # Find optimal K if not specified
     if args.k is None:
         optimal_k, scores = find_optimal_k(
-            z_c, 
+            z_d, 
             max_k=args.max_k, 
             min_k=args.min_k,
             method=args.method
@@ -570,10 +696,12 @@ Note: This script is for clustering ORIGINAL training data.
         k = optimal_k
         
         # Plot K selection metrics
-        plot_k_selection(scores, args.output_dir)
+        output_dataset_dir = os.path.join(args.output_dir, args.dataset)
+        os.makedirs(output_dataset_dir, exist_ok=True)
+        plot_k_selection(scores, output_dataset_dir)
         
         # Save scores
-        scores_path = os.path.join(args.output_dir, f"{args.output_name}_k_scores.json")
+        scores_path = os.path.join(output_dataset_dir, f"{args.output_name}_k_scores.json")
         with open(scores_path, 'w') as f:
             json.dump(scores, f, indent=2)
         print(f"✓ Saved K selection scores to: {scores_path}")
@@ -581,9 +709,9 @@ Note: This script is for clustering ORIGINAL training data.
         k = args.k
         print(f"\nUsing specified K={k}")
     
-    # Perform clustering and sampling
+    # Perform clustering and sampling on z_d
     clusters, cluster_labels, kmeans = cluster_and_sample(
-        z_c=z_c,
+        z_d=z_d,
         sentences=sentences,
         labels=labels,
         k=k,
@@ -592,26 +720,29 @@ Note: This script is for clustering ORIGINAL training data.
     )
     
     # Save results
+    output_dataset_dir = os.path.join(args.output_dir, args.dataset)
+    os.makedirs(output_dataset_dir, exist_ok=True)
+    
     csv_path, csv_all_path, json_path = save_clustered_data(
         clusters=clusters,
         cluster_labels=cluster_labels,
         sentences=sentences,
         labels=labels,
-        output_dir=args.output_dir,
+        output_dir=output_dataset_dir,
         filename=args.output_name
     )
     
     print(f"\n{'='*70}")
     print("CLUSTERING AND SAMPLING COMPLETE!")
     print(f"{'='*70}")
-    print(f"\nOutput files saved to: {args.output_dir}/")
+    print(f"\nOutput files saved to: {output_dataset_dir}/")
     print(f"  - {args.output_name}.csv (Sampled sentences from each cluster)")
     print(f"  - {args.output_name}_all_clusters.csv (All sentences with cluster assignments)")
     print(f"  - {args.output_name}_metadata.json (Cluster metadata)")
     if args.k is None:
         print(f"  - {args.output_name}_k_scores.json (K selection scores)")
         print(f"  - k_selection_metrics.png (K selection plots)")
-    print(f"\nCluster summary:")
+    print(f"\nCluster summary (clustered on z_d embeddings):")
     for cluster_id, cluster_data in sorted(clusters.items()):
         print(f"  Cluster {cluster_id}: {cluster_data['cluster_size']} samples, {cluster_data['n_sampled']} sampled")
     print(f"{'='*70}\n")

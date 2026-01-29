@@ -6,3 +6,5 @@ bert_cache
 sampled_data
 predicted
 models
+__pycache__
+components/__pycache__

@@ -118,8 +118,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lambda-kl",
         type=float,
-        default=0.01,
-        help="VAE KL loss weight (regularization for compression only, default: 0.01)"
+        default=1.0,
+        help="VAE KL loss weight for z_c and z_d to N(0,I) prior (default: 1.0, beta-VAE style for smooth latent space and generation)"
+    )
+    parser.add_argument(
+        "--lambda-var",
+        type=float,
+        default=0.1,
+        help="Variance/energy constraint weight for z_d (prevents collapse, default: 0.1)"
     )
     parser.add_argument(
         "--latent-dim",

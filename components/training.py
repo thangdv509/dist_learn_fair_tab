@@ -38,10 +38,14 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
     3. L_ind: HSIC(z_c, z_d) (minimize) - z_c and z_d are statistically independent
     4. L_rec: ||D_c(z_c) + D_d(z_d) - h||² (minimize) - additive reconstruction
     
-    + L_kl: VAE regularization (compression + regularization only, small weight)
+    + L_kl: VAE KL regularization KL(q(z_c|x)||N(0,I)) + KL(q(z_d|x)||N(0,I))
+            Ensures z_c and z_d follow standard normal distribution for:
+            - Smooth latent space (good interpolation)
+            - Proper sampling (can sample z ~ N(0,I) and decode to generate data)
+            - Normalized distribution (prevents sampling outside manifold)
     + L_var: Variance/energy constraint on z_d to prevent collapse to noise
     
-    NOTE: VAE is used for compression (768 → latent_dim), NOT for generation.
+    NOTE: VAE is used for compression (768 → latent_dim) AND generation (can sample z ~ N(0,I) and decode).
     NOTE: No GRL/adversarial training - pure HSIC-based LIRD framework.
     """
     print(f"\n{'='*70}")
@@ -54,7 +58,8 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
     print(f"  2. λ_adv={lambda_adv} : HSIC(z_d, y) (target: ~0, label-independence)")
     print(f"  3. λ_ortho={lambda_ortho} : HSIC(z_c, z_d) (target: ~0, disentangle)")
     print(f"  4. λ_rec={lambda_rec} : ||D_c(z_c) + D_d(z_d) - h||² (target: ~0, reconstruction)")
-    print(f"\n  + λ_kl={lambda_kl} : VAE regularization (compression only)")
+    print(f"\n  + λ_kl={lambda_kl} : VAE KL regularization KL(q(z_c|x)||N(0,I)) + KL(q(z_d|x)||N(0,I))")
+    print(f"    → Ensures smooth latent space and proper sampling for generation")
     print(f"  + λ_var={lambda_var} : Variance/energy constraint on z_d (prevent collapse)")
     print(f"{'='*70}\n")
     
@@ -265,9 +270,13 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
                 # 4. L_rec: z_c + z_d → x (MINIMIZE) - reconstruction
                 loss_rec = compute_reconstruction_loss(output['original_h'], output['reconstructed'])
                 
-                # + L_kl: VAE regularization (compression only, small weight)
-                loss_kl_c = compute_kl_loss(output['mu_c'], output['logvar_c'])
-                loss_kl_d = compute_kl_loss(output['mu_d'], output['logvar_d'])
+                # + L_kl: VAE KL regularization to N(0,I) prior for both z_c and z_d
+                # This ensures:
+                # 1. Smooth latent space (good interpolation between points)
+                # 2. Proper sampling (can sample z ~ N(0,I) and decode to generate realistic data)
+                # 3. Normalized distribution (prevents sampling outside the learned manifold)
+                loss_kl_c = compute_kl_loss(output['mu_c'], output['logvar_c'])  # KL(q(z_c|x) || N(0,I))
+                loss_kl_d = compute_kl_loss(output['mu_d'], output['logvar_d'])  # KL(q(z_d|x) || N(0,I))
                 loss_kl = loss_kl_c + loss_kl_d
                 
                 # + L_var: Variance/energy constraint to prevent z_d collapse
@@ -312,7 +321,7 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
                 # 2. L_rec: D_c(z_c) + D_d(z_d) → h (MINIMIZE → 0) - additive reconstruction
                 # 3. L_ind: HSIC(z_c, z_d) (MINIMIZE → 0) - disentangle
                 # 4. L_y: HSIC(z_d, y) (MINIMIZE → 0) - label-independence
-                # + L_kl: VAE regularization (compression only)
+                # + L_kl: VAE KL regularization to N(0,I) (smooth latent space + generation)
                 # + L_var: Variance/energy constraint to prevent z_d collapse
                 
                 loss_enc = (
@@ -489,7 +498,7 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
     print(f"     Acc(z_d → y): {history['acc_task_from_z_d'][-1]:.3f} (target: {random_target_str})")
     print(f"  3. L_ind (HSIC(z_c, z_d)): {history['loss_ortho'][-1]:.4f} (target: ~0) - disentangle")
     print(f"  4. L_rec (reconstruction): {history['loss_rec'][-1]:.4f} (target: ~0) - additive reconstruction")
-    print(f"\n  + L_kl (VAE regularization): {history['loss_kl'][-1]:.4f}")
+    print(f"\n  + L_kl (VAE KL to N(0,I)): {history['loss_kl'][-1]:.4f} (smooth latent space + generation)")
     print(f"  + L_var (variance/energy constraint): {history['loss_var'][-1]:.4f} (prevent z_d collapse)")
     print(f"\nNOTE: Per-class accuracy is w.r.t. task labels (y), NOT sensitive attributes")
     print(f"{'='*70}")
@@ -501,13 +510,29 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         best_model_path = os.path.join(model_dir, f"best_model_{timestamp}.pth")
         
-        # Save best model
-        torch.save(best_model_state, best_model_path)
-        print(f"\n✓ Best model saved to: {best_model_path}")
-        print(f"  Epoch: {best_model_epoch}, Loss: {best_loss:.4f}")
-        print(f"  Acc(z_c→y): {best_model_state['acc_z_c']:.3f}, Acc(z_d→y): {best_model_state['acc_z_d']:.3f}")
+        # Save best model with atomic write (save to temp file first, then rename)
+        # This prevents corruption if training is interrupted during save
+        import tempfile
+        import shutil
         
-        # Also save final model
+        # Save best model atomically
+        temp_best_path = best_model_path + ".tmp"
+        try:
+            torch.save(best_model_state, temp_best_path)
+            # Verify the file can be loaded before renaming
+            test_checkpoint = torch.load(temp_best_path, map_location='cpu', weights_only=False)
+            shutil.move(temp_best_path, best_model_path)
+            print(f"\n✓ Best model saved to: {best_model_path}")
+            print(f"  Epoch: {best_model_epoch}, Loss: {best_loss:.4f}")
+            print(f"  Acc(z_c→y): {best_model_state['acc_z_c']:.3f}, Acc(z_d→y): {best_model_state['acc_z_d']:.3f}")
+        except Exception as e:
+            # Clean up temp file if save failed
+            if os.path.exists(temp_best_path):
+                os.remove(temp_best_path)
+            print(f"⚠ Warning: Failed to save best model: {e}")
+            raise
+        
+        # Also save final model atomically
         final_model_path = os.path.join(model_dir, f"final_model_{timestamp}.pth")
         final_model_state = {
             'epoch': num_epochs,
@@ -520,8 +545,20 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
             'd_model': 768,
             'history': history  # Include full training history
         }
-        torch.save(final_model_state, final_model_path)
-        print(f"✓ Final model saved to: {final_model_path}")
+        
+        temp_final_path = final_model_path + ".tmp"
+        try:
+            torch.save(final_model_state, temp_final_path)
+            # Verify the file can be loaded before renaming
+            test_checkpoint = torch.load(temp_final_path, map_location='cpu', weights_only=False)
+            shutil.move(temp_final_path, final_model_path)
+            print(f"✓ Final model saved to: {final_model_path}")
+        except Exception as e:
+            # Clean up temp file if save failed
+            if os.path.exists(temp_final_path):
+                os.remove(temp_final_path)
+            print(f"⚠ Warning: Failed to save final model: {e}")
+            raise
     else:
         print("\n⚠ No best model to save (training may have failed)")
     
