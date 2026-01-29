@@ -48,20 +48,84 @@ def load_model(model_path, device=device):
     
     print(f"  File size: {file_size / (1024*1024):.2f} MB")
     
-    try:
-        # Always load to CPU first to handle GPU/CPU mismatch
-        # This allows loading models trained on GPU on CPU (and vice versa)
-        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
-    except RuntimeError as e:
-        if "failed finding central directory" in str(e) or "zip archive" in str(e):
-            raise RuntimeError(
-                f"Model file appears to be corrupted: {model_path}\n"
-                f"Error: {e}\n"
-                f"Please check if the file was saved completely. "
-                f"You may need to retrain the model or use a different checkpoint."
-            ) from e
-        else:
-            raise
+    # Try to load safetensors first (safer, faster), fallback to .pth
+    safetensors_path = model_path.replace('.pth', '.safetensors')
+    checkpoint = None
+    use_safetensors = False
+    
+    # Check if safetensors file exists
+    if os.path.exists(safetensors_path):
+        try:
+            import safetensors.torch
+            print(f"  Loading from safetensors format: {safetensors_path}")
+            # Load state_dict from safetensors
+            state_dict = safetensors.torch.load_file(safetensors_path)
+            
+            # Load metadata from .pth file (metadata is always saved in .pth)
+            # If .pth is corrupted, use default values
+            if os.path.exists(model_path):
+                try:
+                    pth_checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+                    # Combine state_dict from safetensors with metadata from .pth
+                    checkpoint = {
+                        'model_state_dict': state_dict,
+                        'epoch': pth_checkpoint.get('epoch', 'unknown'),
+                        'loss': pth_checkpoint.get('loss', 'unknown'),
+                        'acc_z_c': pth_checkpoint.get('acc_z_c', 'unknown'),
+                        'acc_z_d': pth_checkpoint.get('acc_z_d', 'unknown'),
+                        'num_classes': pth_checkpoint.get('num_classes', 2),
+                        'latent_dim': pth_checkpoint.get('latent_dim', 64),
+                        'd_model': pth_checkpoint.get('d_model', 768),
+                    }
+                except Exception as e:
+                    # If .pth is corrupted, use state_dict from safetensors with default metadata
+                    print(f"  ⚠ .pth file corrupted, using safetensors with default metadata")
+                    checkpoint = {
+                        'model_state_dict': state_dict,
+                        'epoch': 'unknown',
+                        'loss': 'unknown',
+                        'acc_z_c': 'unknown',
+                        'acc_z_d': 'unknown',
+                        'num_classes': 2,
+                        'latent_dim': 64,
+                        'd_model': 768,
+                    }
+            else:
+                # Only safetensors available, use default metadata
+                checkpoint = {
+                    'model_state_dict': state_dict,
+                    'epoch': 'unknown',
+                    'loss': 'unknown',
+                    'acc_z_c': 'unknown',
+                    'acc_z_d': 'unknown',
+                    'num_classes': 2,
+                    'latent_dim': 64,
+                    'd_model': 768,
+                }
+            use_safetensors = True
+            print(f"  ✓ Loaded state_dict from safetensors (faster, safer)")
+        except ImportError:
+            print("  ⚠ safetensors not available, falling back to .pth format")
+        except Exception as e:
+            print(f"  ⚠ Failed to load safetensors: {e}, falling back to .pth format")
+    
+    # Fallback to .pth format
+    if checkpoint is None:
+        print(f"  Loading from PyTorch format: {model_path}")
+        try:
+            # Always load to CPU first to handle GPU/CPU mismatch
+            # This allows loading models trained on GPU on CPU (and vice versa)
+            checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+        except RuntimeError as e:
+            if "failed finding central directory" in str(e) or "zip archive" in str(e):
+                raise RuntimeError(
+                    f"Model file appears to be corrupted: {model_path}\n"
+                    f"Error: {e}\n"
+                    f"Please check if the file was saved completely. "
+                    f"You may need to retrain the model or use a different checkpoint."
+                ) from e
+            else:
+                raise
     
     # Extract model parameters
     num_classes = checkpoint.get('num_classes', 2)

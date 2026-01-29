@@ -512,23 +512,121 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
         
         # Save best model with atomic write (save to temp file first, then rename)
         # This prevents corruption if training is interrupted during save
-        import tempfile
+        # Best practices:
+        # 1. Save to temp file first
+        # 2. Verify file can be loaded
+        # 3. Use fsync to ensure data is written to disk
+        # 4. Atomic rename (atomic on most filesystems)
         import shutil
         
-        # Save best model atomically
-        temp_best_path = best_model_path + ".tmp"
+        def save_checkpoint_safely(checkpoint_dict, filepath, use_safetensors=True):
+            """
+            Save checkpoint safely with atomic write and verification.
+            
+            Args:
+                checkpoint_dict: Dictionary containing model state and metadata
+                filepath: Path to save checkpoint (will determine format from extension)
+                use_safetensors: If True, also save as .safetensors (safer, faster)
+            """
+            # Save as .pth (PyTorch format) for compatibility
+            temp_path = filepath + ".tmp"
+            try:
+                # Save to temp file
+                with open(temp_path, 'wb') as f:
+                    torch.save(checkpoint_dict, f)
+                    # Force write to disk (important for preventing corruption)
+                    f.flush()
+                    os.fsync(f.fileno())
+                
+                # Verify the file can be loaded before renaming
+                test_checkpoint = torch.load(temp_path, map_location='cpu', weights_only=False)
+                # Check that essential keys exist
+                if 'model_state_dict' not in test_checkpoint:
+                    raise ValueError("Saved checkpoint missing 'model_state_dict'")
+                
+                # Atomic rename (atomic on most filesystems)
+                if os.name == 'nt':  # Windows
+                    # On Windows, rename might fail if file exists, so remove first
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    os.rename(temp_path, filepath)
+                else:  # Unix/Linux/Mac
+                    os.rename(temp_path, filepath)
+                
+                # Also save as safetensors if requested (safer, faster, no pickle)
+                if use_safetensors:
+                    try:
+                        import safetensors.torch
+                        # Create safetensors path
+                        safetensors_path = filepath.replace('.pth', '.safetensors')
+                        temp_safetensors_path = safetensors_path + ".tmp"
+                        
+                        # Extract metadata (non-tensor data)
+                        metadata = {
+                            'epoch': str(checkpoint_dict.get('epoch', 'unknown')),
+                            'loss': str(checkpoint_dict.get('loss', 'unknown')),
+                            'acc_z_c': str(checkpoint_dict.get('acc_z_c', 'unknown')),
+                            'acc_z_d': str(checkpoint_dict.get('acc_z_d', 'unknown')),
+                            'num_classes': str(checkpoint_dict.get('num_classes', 'unknown')),
+                            'latent_dim': str(checkpoint_dict.get('latent_dim', 'unknown')),
+                            'd_model': str(checkpoint_dict.get('d_model', 'unknown')),
+                        }
+                        
+                        # Save state_dict as safetensors
+                        with open(temp_safetensors_path, 'wb') as f:
+                            safetensors.torch.save_file(
+                                checkpoint_dict['model_state_dict'],
+                                f,
+                                metadata=metadata
+                            )
+                            f.flush()
+                            os.fsync(f.fileno())
+                        
+                        # Verify safetensors file
+                        test_state_dict = safetensors.torch.load_file(temp_safetensors_path)
+                        if len(test_state_dict) == 0:
+                            raise ValueError("Saved safetensors file is empty")
+                        
+                        # Atomic rename for safetensors
+                        if os.name == 'nt':
+                            if os.path.exists(safetensors_path):
+                                os.remove(safetensors_path)
+                            os.rename(temp_safetensors_path, safetensors_path)
+                        else:
+                            os.rename(temp_safetensors_path, safetensors_path)
+                        
+                    except ImportError:
+                        print("  ⚠ safetensors not available, skipping .safetensors save")
+                    except Exception as e:
+                        # Clean up temp safetensors file if save failed
+                        if os.path.exists(temp_safetensors_path):
+                            try:
+                                os.remove(temp_safetensors_path)
+                            except:
+                                pass
+                        print(f"  ⚠ Failed to save safetensors (non-critical): {e}")
+                
+                return True
+            except Exception as e:
+                # Clean up temp file if save failed
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+                raise e
+        
+        # Save best model atomically (both .pth and .safetensors)
         try:
-            torch.save(best_model_state, temp_best_path)
-            # Verify the file can be loaded before renaming
-            test_checkpoint = torch.load(temp_best_path, map_location='cpu', weights_only=False)
-            shutil.move(temp_best_path, best_model_path)
-            print(f"\n✓ Best model saved to: {best_model_path}")
+            save_checkpoint_safely(best_model_state, best_model_path, use_safetensors=True)
+            safetensors_path = best_model_path.replace('.pth', '.safetensors')
+            print(f"\n✓ Best model saved:")
+            print(f"  - PyTorch format: {best_model_path}")
+            if os.path.exists(safetensors_path):
+                print(f"  - Safetensors format: {safetensors_path}")
             print(f"  Epoch: {best_model_epoch}, Loss: {best_loss:.4f}")
             print(f"  Acc(z_c→y): {best_model_state['acc_z_c']:.3f}, Acc(z_d→y): {best_model_state['acc_z_d']:.3f}")
         except Exception as e:
-            # Clean up temp file if save failed
-            if os.path.exists(temp_best_path):
-                os.remove(temp_best_path)
             print(f"⚠ Warning: Failed to save best model: {e}")
             raise
         
@@ -546,17 +644,15 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
             'history': history  # Include full training history
         }
         
-        temp_final_path = final_model_path + ".tmp"
+        # Save final model atomically (both .pth and .safetensors)
         try:
-            torch.save(final_model_state, temp_final_path)
-            # Verify the file can be loaded before renaming
-            test_checkpoint = torch.load(temp_final_path, map_location='cpu', weights_only=False)
-            shutil.move(temp_final_path, final_model_path)
-            print(f"✓ Final model saved to: {final_model_path}")
+            save_checkpoint_safely(final_model_state, final_model_path, use_safetensors=True)
+            safetensors_path = final_model_path.replace('.pth', '.safetensors')
+            print(f"✓ Final model saved:")
+            print(f"  - PyTorch format: {final_model_path}")
+            if os.path.exists(safetensors_path):
+                print(f"  - Safetensors format: {safetensors_path}")
         except Exception as e:
-            # Clean up temp file if save failed
-            if os.path.exists(temp_final_path):
-                os.remove(temp_final_path)
             print(f"⚠ Warning: Failed to save final model: {e}")
             raise
     else:
