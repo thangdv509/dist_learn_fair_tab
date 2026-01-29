@@ -25,7 +25,7 @@ Key Objectives:
 import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
-from data_loader import load_german_credit_data_balanced, load_dataset_generic, save_processed_data
+from data_loader import load_german_credit_data_balanced, load_dataset_generic
 from visualization import (
     visualize_reconstruction_and_attention, 
     visualize_batch_analysis, 
@@ -179,9 +179,6 @@ if __name__ == "__main__":
     
     print(f"\nLoaded {len(sentences)} samples")
     print(f"Label distribution: {sum(labels)} (1), {len(labels) - sum(labels)} (0)")
-    
-    # Save processed data
-    save_processed_data(sentences, labels, args.dataset)
     
     # Create visualization directory
     vis_dir = f"visualizations/{args.dataset}"
