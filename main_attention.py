@@ -44,7 +44,7 @@ from components import (
     CD_Model,
     TextDataset,
     train_cd_model,
-    save_encodings,
+    # save_encodings,  # Not used anymore - not saving predicted data
     compute_and_cache_tokenized_data,
     device
 )
@@ -94,8 +94,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lambda-task",
         type=float,
-        default=3.0,
-        help="Task loss weight (default: 3.0 to prioritize learning task from z_c)"
+        default=10.0,
+        help="Task loss weight (default: 10.0 to strongly prioritize learning task from z_c)"
     )
     parser.add_argument(
         "--lambda-adv",
@@ -112,14 +112,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lambda-ortho",
         type=float,
-        default=1.0,
-        help="HSIC(z_c, z_d) weight for disentanglement (default: 1.0, LIRD framework)"
+        default=0.1,
+        help="HSIC(z_c, z_d) weight for disentanglement (default: 0.1, reduced to prevent z_c from losing task information)"
     )
     parser.add_argument(
         "--lambda-kl",
         type=float,
-        default=1.0,
-        help="VAE KL loss weight for z_c and z_d to N(0,I) prior (default: 1.0, beta-VAE style for smooth latent space and generation)"
+        default=0.01,
+        help="VAE KL loss weight for z_c and z_d to N(0,I) prior (default: 0.01, reduced from 1.0 to prevent information loss)"
     )
     parser.add_argument(
         "--lambda-var",
@@ -211,7 +211,7 @@ if __name__ == "__main__":
             if gpu_memory_gb >= 30:  # RTX 5090, A100, etc. (30GB+)
                 args.batch_size = 200
             elif gpu_memory_gb >= 20:  # RTX 4090, etc. (20-30GB)
-                args.batch_size = 32
+                args.batch_size = 64
             elif gpu_memory_gb >= 10:  # RTX 3080, etc. (10-20GB)
                 args.batch_size = 16
             else:  # Smaller GPUs (<10GB)
@@ -295,13 +295,14 @@ if __name__ == "__main__":
     visualize_attention_comparison(model, vis_dataloader_text, num_samples=min(10, args.visualize_samples), save_dir=vis_dir)
     
     # Save encodings (z_c and z_d) to predicted/{dataset_name}_{timestamp}/
-    print(f"\n{'='*70}")
-    print(f"SAVING ENCODINGS")
-    print(f"{'='*70}")
-    pred_dir = save_encodings(
-        model, sentences, labels, args.dataset, tokenizer, 
-        max_len=256, cached_data=cached_data_full
-    )
+    # DISABLED: Not saving predicted data anymore, only keeping processed_data
+    # print(f"\n{'='*70}")
+    # print(f"SAVING ENCODINGS")
+    # print(f"{'='*70}")
+    # pred_dir = save_encodings(
+    #     model, sentences, labels, args.dataset, tokenizer, 
+    #     max_len=256, cached_data=cached_data_full
+    # )
     
     print(f"\n{'='*70}")
     print(f"✓ TRAINING AND VISUALIZATION COMPLETE!")
@@ -312,9 +313,9 @@ if __name__ == "__main__":
     print(f"     - attention_comparison_*.png (bar charts comparing z_c vs z_d attention)")
     print(f"     - sample_*_attention.png (heatmaps for each sample)")
     print(f"     - latent_space_pca_2d.png (PCA projection of z_c and z_d)")
-    print(f"  📁 Predictions: {pred_dir}/")
-    print(f"     - encodings.csv (z_c and z_d for all samples)")
-    print(f"     - z_c.npy, z_d.npy (numpy arrays)")
+    # print(f"  📁 Predictions: {pred_dir}/")
+    # print(f"     - encodings.csv (z_c and z_d for all samples)")
+    # print(f"     - z_c.npy, z_d.npy (numpy arrays)")
     print(f"\nKey metrics to check:")
     print(f"  1. Acc(z_c→y) should be HIGH (~1.0) - z_c contains task info")
     print(f"  2. Acc(z_d→y) should be LOW (~0.5) - z_d does NOT contain task info")

@@ -22,7 +22,7 @@ from .losses import (
 from .tokenization import compute_and_cache_tokenized_data
 
 
-def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3.0, lambda_adv=8.0, lambda_rec=0.5, lambda_ortho=1.0, lambda_kl=0.01, lambda_var=0.1, latent_dim=64, lr=2e-5, use_cache=True, dataset_name="default", force_recompute_cache=False, use_amp=False):
+def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3.0, lambda_adv=8.0, lambda_rec=0.5, lambda_ortho=1.0, lambda_kl=0.01, lambda_var=0.1, latent_dim=32, lr=2e-5, use_cache=True, dataset_name="default", force_recompute_cache=False, use_amp=False):
     """
     Train the model to learn disentangled representations from Natural Language (LIRD framework).
     
@@ -288,7 +288,8 @@ def train_cd_model(sentences, labels, num_epochs=50, batch_size=8, lambda_task=3
                 # ============ TRAIN CLASSIFIER SEPARATELY (MULTIPLE STEPS) ============
                 # Train classifier multiple times per batch to learn faster
                 # This helps classifier learn task before encoder tries to optimize z_c
-                num_classifier_steps = 3  # Train classifier 3 times per batch
+                # Increased to 5 steps to ensure classifier learns well before encoder optimization
+                num_classifier_steps = 5  # Train classifier 5 times per batch
                 for _ in range(num_classifier_steps):
                     optimizer_classifier.zero_grad()
                     z_c_detached = output['z_c'].detach()  # Detach to avoid gradient conflict
